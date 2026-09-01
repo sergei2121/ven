@@ -1,44 +1,65 @@
-/* ========= модель данных кластера «Венера» ========= */
+/* ============================================================
+   ВЕНЕРА · модель данных распределённой VMS
+   до 70 серверов записи × ~110 ONVIF-камер · клиент на 100 окон
+   ============================================================ */
+
+export const SERVER_OS = "Ubuntu 24.04 LTS";
+export const CLIENT_OS = "Windows 11 Pro 24H2";
+export const MAX_TEMPLATE_CAMS = 100;
+
+/* ---------------- серверы ---------------- */
 
 export type ServerStatus = "online" | "offline" | "maint";
 
 export interface VServer {
   id: number;            // 1..70
-  name: string;          // Венера-С07
-  ip: string;            // 10.20.x.y
+  name: string;          // С-01
+  ip: string;
   status: ServerStatus;
   camCount: number;
-  netMbps: number;       // ~400 Мбит/с: архивация + просмотр
-  archiveFill: number;   // %
-  hddTemp: number;       // средняя по массиву
-  hddWarn: number;       // дисков с предупреждением SMART
+  netMbps: number;       // архивация + просмотр, ≈ 400
+  archiveFill: number;   // % заполнения СХД
+  hddTemp: number;       // средняя t° массива
+  hddWarn: number;       // SMART-предупреждения
   uptimeDays: number;
 }
 
+const CAMS_PER: number[] = [];
+for (let i = 1; i <= 70; i++) CAMS_PER.push(104 + ((i * 7) % 17));
+
+export const SERVERS: VServer[] = CAMS_PER.map((n, idx) => {
+  const id = idx + 1;
+  return {
+    id,
+    name: `С-${String(id).padStart(2, "0")}`,
+    ip: `10.20.${id}.10`,
+    status: id === 14 || id === 48 ? "offline" : id === 27 ? "maint" : "online",
+    camCount: n,
+    netMbps: Math.round(n * 3.15 + ((id * 13) % 22)),
+    archiveFill: 56 + ((id * 11) % 37),
+    hddTemp: 33 + ((id * 5) % 13),
+    hddWarn: id === 23 ? 1 : id === 52 ? 2 : 0,
+    uptimeDays: 28 + ((id * 37) % 340),
+  };
+});
+
+export const TOTAL_CAMS = SERVERS.reduce((a, s) => a + s.camCount, 0);
+
+/* ---------------- камеры ---------------- */
+
 export interface Cam {
-  id: number;
-  serverId: number;
+  id: number;            // serverId*1000 + номер
   num: string;
   name: string;
+  serverId: number;
   status: "online" | "offline";
   ptz: boolean;
   hue: number;
-  mainMbps: number;      // 1.0–4.0, максимум — у немногих
-  subKbps: number;       // 500–1000 кбит/с
   boxDelay: number;
   boxDur: number;
+  mainMbps: number;      // 1.0–4.0, максимум у немногих
+  subKbps: number;       // 500–1000
 }
-
-export interface Template {
-  id: string;
-  name: string;
-  camIds: number[];      // максимум 100
-}
-
-export const SERVER_COUNT = 70;
-export const SERVER_OS = "Ubuntu Server 24.04 LTS";
-export const CLIENT_OS = "Ubuntu 24.04 LTS · NVIDIA 550 (NVDEC)";
-export const MAX_TEMPLATE_CAMS = 100;
 
 const LOCATIONS = [
   "Главный вход", "Северный периметр", "Склад А", "Склад Б", "Паркинг P1",
@@ -49,78 +70,73 @@ const LOCATIONS = [
   "Раздевалка", "Цех №1", "Цех №2", "Котельная", "Водомерный узел",
 ];
 
-export const SERVERS: VServer[] = Array.from({ length: SERVER_COUNT }, (_, i) => {
-  const id = i + 1;
+function makeCam(serverId: number, n: number): Cam {
+  const loc = LOCATIONS[n % LOCATIONS.length];
+  const zone = Math.floor(n / LOCATIONS.length) + 1;
+  const mainMbps = n % 17 === 0 ? 4 : n % 3 === 0 ? 3 : n % 2 === 0 ? 2 : 1.5;
   return {
-    id,
-    name: `Венера-С${String(id).padStart(2, "0")}`,
-    ip: `10.20.${Math.floor(i / 20)}.${10 + (i % 20) * 4}`,
-    status: id % 23 === 9 ? "offline" : id % 17 === 4 ? "maint" : "online",
-    camCount: 96 + ((id * 7) % 25),
-    netMbps: 362 + ((id * 13) % 78),
-    archiveFill: 58 + ((id * 11) % 36),
-    hddTemp: 34 + ((id * 5) % 12),
-    hddWarn: id % 11 === 0 ? 1 : 0,
-    uptimeDays: 12 + ((id * 3) % 210),
+    id: serverId * 1000 + n + 1,
+    num: String(n + 1).padStart(3, "0"),
+    name: zone === 1 ? loc : `${loc} · зона ${zone}`,
+    serverId,
+    status: (serverId * 7 + n) % 29 === 5 ? "offline" : "online",
+    ptz: n % 12 === 0,
+    hue: (serverId * 37 + n * 13) % 360,
+    boxDelay: ((serverId + n) * 0.73) % 9,
+    boxDur: 7 + ((serverId + n) * 1.31) % 5,
+    mainMbps,
+    subKbps: 500 + ((serverId + n) % 6) * 100,
   };
+}
+
+export const CAMS: Cam[] = [];
+export const CAMS_BY_SERVER = new Map<number, Cam[]>();
+SERVERS.forEach((s) => {
+  const arr = Array.from({ length: s.camCount }, (_, k) => makeCam(s.id, k));
+  CAMS_BY_SERVER.set(s.id, arr);
+  CAMS.push(...arr);
 });
 
-/* камеры: по ~96–120 на сервер, id = serverId*1000 + idx */
-export const CAMS: Cam[] = [];
-for (const s of SERVERS) {
-  for (let k = 0; k < s.camCount; k++) {
-    const i = k;
-    const loc = LOCATIONS[(s.id * 3 + k) % LOCATIONS.length];
-    CAMS.push({
-      id: s.id * 1000 + k,
-      serverId: s.id,
-      num: String(CAMS.length + 1).padStart(4, "0"),
-      name: `${loc}${k >= LOCATIONS.length ? ` · зона ${Math.floor(k / LOCATIONS.length) + 1}` : ""}`,
-      status: k % 29 === 7 ? "offline" : "online",
-      ptz: k % 9 === 0,
-      hue: ((s.id * 47 + k * 31) % 360),
-      mainMbps: 1 + ((k * 7 + s.id) % 30) / 10, // 1.0–3.9, 4 Мбит — редкость
-      subKbps: 500 + ((k + s.id) % 6) * 100,    // 500–1000 кбит/с
-      boxDelay: ((s.id + k) * 0.73) % 9,
-      boxDur: 7 + (((s.id + k) * 1.31) % 5),
-    });
-    void i;
-  }
+/* ---------------- шаблоны ---------------- */
+
+export interface Template {
+  id: string;
+  name: string;
+  camIds: number[];      // до MAX_TEMPLATE_CAMS
 }
 
-export const TOTAL_CAMS = CAMS.length;
-
-/* стартовые шаблоны */
-function byServer(): Map<number, Cam[]> {
-  const m = new Map<number, Cam[]>();
+export function defaultTemplates(): Template[] {
+  const svodka: number[] = [];
+  for (let s = 1; s <= 12; s++) {
+    const arr = CAMS_BY_SERVER.get(s)!;
+    svodka.push(arr[0].id, arr[9].id);
+  }
+  const perimetr: number[] = [];
+  for (let s = 1; s <= 50 && perimetr.length < MAX_TEMPLATE_CAMS; s += 1) {
+    const arr = CAMS_BY_SERVER.get(s)!;
+    perimetr.push(arr[3].id, arr[14].id);
+  }
+  const sklady: number[] = [];
   for (const c of CAMS) {
-    const arr = m.get(c.serverId);
-    if (arr) arr.push(c);
-    else m.set(c.serverId, [c]);
+    if (c.name.startsWith("Склад") && sklady.length < 16) sklady.push(c.id);
+    if (sklady.length >= 16) break;
   }
-  return m;
-}
-
-export function seedTemplates(): Template[] {
-  const m = byServer();
-  const t1: number[] = [];
-  for (const s of SERVERS) {
-    const cams = m.get(s.id) ?? [];
-    if (cams[0]) t1.push(cams[0].id);
-    if (t1.length >= MAX_TEMPLATE_CAMS) break;
+  const kpp: number[] = [];
+  for (const c of CAMS) {
+    if ((c.name.startsWith("КПП") || c.name.startsWith("Главный вход")) && kpp.length < 8) {
+      kpp.push(c.id);
+    }
+    if (kpp.length >= 8) break;
   }
-  for (const s of SERVERS.slice(0, MAX_TEMPLATE_CAMS - t1.length)) {
-    const cams = m.get(s.id) ?? [];
-    if (cams[1]) t1.push(cams[1].id);
-  }
-  const t2 = CAMS.filter((c) => /КПП|Периметр|вход|Вход|Кровля/.test(c.name)).filter((_, i) => i % 3 === 0).slice(0, 48).map((c) => c.id);
-  const t3 = CAMS.filter((c) => /Склад|Рампа|док|Ангар/.test(c.name)).filter((_, i) => i % 4 === 0).slice(0, 36).map((c) => c.id);
   return [
-    { id: "tpl-overview", name: "Обзор кластера", camIds: t1.slice(0, 100) },
-    { id: "tpl-perimeter", name: "Периметр и КПП", camIds: t2 },
-    { id: "tpl-warehouse", name: "Склады и логистика", camIds: t3 },
+    { id: "tpl-svodka", name: "Сводная · 24", camIds: svodka },
+    { id: "tpl-100", name: "Периметр · 100", camIds: perimetr },
+    { id: "tpl-sklady", name: "Склады", camIds: sklady },
+    { id: "tpl-kpp", name: "КПП и входы", camIds: kpp },
   ];
 }
+
+/* ---------------- события журнала ---------------- */
 
 export type EventType = "motion" | "archive" | "offline" | "ptz" | "auth";
 
@@ -134,89 +150,119 @@ export function eventText(type: EventType): string {
   }
 }
 
-/* ========= расчёт ресурсов ========= */
+/* ============================================================
+   Расчёт ресурсов
+   ============================================================ */
 
 export type GpuId = "igpu" | "gtx1060" | "gtx1660";
 
-export const GPU_CAPS: Record<GpuId, { label: string; mbps: number; note: string }> = {
-  igpu: { label: "UHD 730 (i5-12400)", mbps: 110, note: "Quick Sync · без дискретной карты" },
-  gtx1060: { label: "GTX 1060", mbps: 260, note: "NVDEC Pascal · H.264/HEVC 8-bit" },
-  gtx1660: { label: "GTX 1660", mbps: 480, note: "NVDEC Turing · рекомендуемая" },
+export const GPU_CAPS: Record<GpuId, { label: string; note: string; mbps: number }> = {
+  igpu: {
+    label: "UHD 730 · i5-12400",
+    note: "iGPU, QuickSync — 100 окон не вытянет",
+    mbps: 60,
+  },
+  gtx1060: {
+    label: "GTX 1060 6GB",
+    note: "NVDEC Pascal · H.264",
+    mbps: 300,
+  },
+  gtx1660: {
+    label: "GTX 1660 6GB",
+    note: "NVDEC Turing · H.264/H.265",
+    mbps: 440,
+  },
 };
 
 export interface CalcState {
-  servers: number;         // 1–70
-  camsPerServer: number;   // 40–140
-  mainMbps: number;        // 1.0–4.0
-  subMbps: number;         // 0.5–1.0
-  storageTB: number;       // 70–100 на сервер
-  retention: number;       // сут
-  motion: number;          // % времени записи
-  windows: number;         // 4–100 окон на клиенте
+  servers: number;        // 1..70
+  camsPerServer: number;  // 40..140
+  mainMbps: number;       // 1..4 (ср.; максимум — у немногих)
+  subMbps: number;        // 0.5..1
+  storageTB: number;      // 70..100 на сервер
+  retention: number;      // сут 7..60
+  motion: number;         // % времени записи
+  windows: number;        // 4..100
   gpu: GpuId;
 }
 
 export const DEFAULT_CALC: CalcState = {
   servers: 70,
-  camsPerServer: 110,
-  mainMbps: 2.6,
-  subMbps: 0.75,
+  camsPerServer: 115,
+  mainMbps: 2.5,
+  subMbps: 0.7,
   storageTB: 100,
   retention: 30,
-  motion: 100,
+  motion: 75,
   windows: 100,
   gpu: "gtx1660",
 };
 
+export const PRESETS: { name: string; state: CalcState }[] = [
+  { name: "ТЗ: 70 × 115 · 2.5 Мбит", state: { ...DEFAULT_CALC } },
+  {
+    name: "Эконом: H.265 · 1.5 Мбит",
+    state: { ...DEFAULT_CALC, mainMbps: 1.5, motion: 60 },
+  },
+  {
+    name: "Предел: 70 × 140 · 4 Мбит",
+    state: { ...DEFAULT_CALC, camsPerServer: 140, mainMbps: 4, motion: 100 },
+  },
+];
+
 export interface CalcResult {
-  totalCams: number;
-  netPerServer: number;     // Мбит/с
-  clusterNetGbps: number;
-  writeMBs: number;         // на сервер
+  netPerServer: number;      // Мбит/с
   archivePerServerTB: number;
-  clusterArchiveTB: number;
-  clusterStorageTB: number;
-  fitPct: number;
+  fitPct: number;            // архив / storageTB
   disksLabel: string;
-  serverCores: number;
-  ramServerGB: number;
+  clusterStorageTB: number;
   clientNetMbps: number;
+  gpuCapMbps: number;
   nvdecPct: number;
+  serverCores: number;
   clientCpuPct: number;
   ramClientGB: number;
-  gpuCapMbps: number;
+  totalCams: number;
+  clusterNetGbps: number;
+  clusterArchiveTB: number;
 }
 
 export function compute(c: CalcState): CalcResult {
-  const totalCams = c.servers * c.camsPerServer;
   const netPerServer = c.camsPerServer * (c.mainMbps + c.subMbps);
-  const clusterNetGbps = (netPerServer * c.servers) / 1000;
-  const writeMBs = (c.camsPerServer * c.mainMbps) / 8;
+  // 1 Мбит/с ≈ 10.8 ГБ/сут
   const archivePerServerTB =
-    (c.camsPerServer * c.mainMbps * 86400 * c.retention * (c.motion / 100)) / 8 / 1e6;
-  const clusterArchiveTB = archivePerServerTB * c.servers;
-  const clusterStorageTB = c.storageTB * c.servers;
+    c.camsPerServer * c.mainMbps * 0.0108 * c.retention * (c.motion / 100);
   const fitPct = (archivePerServerTB / c.storageTB) * 100;
-  const disksLabel = c.storageTB <= 84 ? "8×14 ТБ RAID-6 (84 ТБ)" : "12×10 ТБ RAID-6 (100 ТБ)";
-  const serverCores = 1.2 + c.camsPerServer * 0.022 + writeMBs * 0.004;
-  const ramServerGB = 3 + c.camsPerServer * 0.02 + 2.4;
+
+  const dataDisks = Math.max(4, Math.ceil(archivePerServerTB / 10));
+  const totalDisks = dataDisks + 2;
+  const disksLabel = `${totalDisks} дисков · RAID-6 12 ТБ`;
+
   const clientNetMbps = c.windows * c.subMbps;
   const gpuCapMbps = GPU_CAPS[c.gpu].mbps;
   const nvdecPct = (clientNetMbps / gpuCapMbps) * 100;
-  const clientCpuPct = 12 + c.windows * 0.45;
-  const ramClientGB = 2.5 + c.windows * 0.09;
+
+  const serverCores = 1.3 + c.camsPerServer * 0.02 + (netPerServer / 1000) * 1.2;
+  const clientCpuPct = 8 + c.windows * 0.45;
+  const ramClientGB = 2.6 + c.windows * 0.09;
+
   return {
-    totalCams, netPerServer, clusterNetGbps, writeMBs,
-    archivePerServerTB, clusterArchiveTB, clusterStorageTB, fitPct, disksLabel,
-    serverCores, ramServerGB, clientNetMbps, nvdecPct, clientCpuPct, ramClientGB, gpuCapMbps,
+    netPerServer,
+    archivePerServerTB,
+    fitPct,
+    disksLabel,
+    clusterStorageTB: c.servers * c.storageTB,
+    clientNetMbps,
+    gpuCapMbps,
+    nvdecPct,
+    serverCores,
+    clientCpuPct,
+    ramClientGB,
+    totalCams: c.servers * c.camsPerServer,
+    clusterNetGbps: (c.servers * netPerServer) / 1000,
+    clusterArchiveTB: c.servers * archivePerServerTB,
   };
 }
-
-export const PRESETS: { name: string; state: CalcState }[] = [
-  { name: "ТЗ: 70×110 · 100 окон", state: { ...DEFAULT_CALC } },
-  { name: "Эконом: H.265 1.5 Мбит", state: { ...DEFAULT_CALC, mainMbps: 1.5, motion: 70 } },
-  { name: "Максимум: 70×140", state: { ...DEFAULT_CALC, camsPerServer: 140 } },
-];
 
 export function fmt(n: number, d = 1): string {
   return n.toLocaleString("ru-RU", { maximumFractionDigits: d, minimumFractionDigits: 0 });
